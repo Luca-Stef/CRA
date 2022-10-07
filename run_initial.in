@@ -1,0 +1,85 @@
+units		metal
+boundary        p p p
+atom_style	atomic
+
+variable       filename string Fe_perfect_L80
+variable       totalstep equal 1000000
+
+variable        xx equal 80
+variable        yy equal 80
+variable        zz equal 80
+
+lattice         bcc 2.86
+region          box block 0 ${xx} 0 ${yy} 0 ${zz}
+create_box       1 box
+create_atoms     1 box
+
+change_box all x scale 0.9983609629815602 y scale 0.9983609629815602 z scale 0.9983614707132933 remap
+
+pair_style	eam/fs
+pair_coeff      * *  Fe-P.eam.fs Fe
+
+neighbor	1.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+run             0
+
+thermo		100
+thermo_style    custom step time atoms pe ke etotal temp pxx pyy pzz pxy pxz pyz lx ly lz xy xz yz vol
+thermo_modify   flush yes format float %23.16e
+
+compute st all stress/atom NULL
+compute pe all pe/atom
+compute voro all voronoi/atom
+
+variable st11 atom c_st[1]/(vol/atoms)/1e6
+variable st22 atom c_st[2]/(vol/atoms)/1e6
+variable st33 atom c_st[3]/(vol/atoms)/1e6
+variable st12 atom c_st[4]/(vol/atoms)/1e6
+variable st31 atom c_st[5]/(vol/atoms)/1e6
+variable st23 atom c_st[6]/(vol/atoms)/1e6
+
+variable I1 atom v_st11+v_st22+v_st33
+variable I2 atom v_st11*v_st22+v_st22*v_st33+v_st11*v_st33-v_st12*v_st12-v_st23*v_st23-v_st31*v_st31
+variable vms atom sqrt(abs(3.0*(1.0/3.0*v_I1*v_I1-v_I2)))
+
+compute ave_pe all reduce ave c_pe
+compute ave_voro all reduce ave c_voro[1]
+compute ave_vms all reduce ave v_vms
+
+variable pe2 atom c_pe*c_pe
+variable voro2 atom c_voro[1]*c_voro[1]
+variable vms2 atom v_vms*v_vms
+
+compute ave_pe2 all reduce ave v_pe2
+compute ave_voro2 all reduce ave v_voro2
+compute ave_vms2 all reduce ave v_vms2
+
+variable vave_pe equal c_ave_pe
+variable vave_voro equal c_ave_voro
+variable vave_vms equal c_ave_vms
+
+variable sd_pe equal sqrt(abs(c_ave_pe2-c_ave_pe*c_ave_pe))
+variable sd_voro equal sqrt(abs(c_ave_voro2-c_ave_voro*c_ave_voro))
+variable sd_vms equal sqrt(abs(c_ave_vms2-c_ave_vms*c_ave_vms))
+
+thermo_style    custom step time atoms pe ke etotal temp pxx pyy pzz pxy pxz pyz lx ly lz xy xz yz vol v_vave_pe v_sd_pe v_vave_voro v_sd_voro v_vave_vms v_sd_vms
+
+fix        8 all box/relax x 0.0 y 0.0 z -0.5 couple xy
+min_style sd
+minimize 0.0 1e-0 100 100000000
+minimize 0.0 1e-1 100 100000000
+minimize 0.0 1e-2 100 100000000
+minimize 0.0 1e-3 100 100000000
+minimize 0.0 1e-4 100 100000000
+minimize 0.0 1e-5 100 100000000
+minimize 0.0 1e-6 100 100000000
+minimize 0.0 1e-7 100 100000000
+minimize 0.0 1e-8 100 100000000
+minimize 0.0 1e-9 100 100000000
+minimize 0.0 1e-10 10000 100000000
+unfix           8
+
+reset_timestep  0
+
+write_data     ${filename}_cg1.lmp
