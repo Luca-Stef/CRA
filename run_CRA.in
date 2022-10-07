@@ -1,0 +1,238 @@
+units		metal
+#boundary        p p p
+atom_style	atomic
+atom_modify	map array
+
+variable	filename string Fe_perfect_L80
+
+read_data	${filename}_cg1.lmp
+#change_box	all triclinic
+
+variable	natoms equal count(all)
+variable	DPA_final equal 3.0   # Final DPA
+variable	DPA_per_step equal 0.001 # 1 mDPA in each relaxation step
+variable	Frenkel_per_step equal round(${DPA_per_step}*${natoms})
+variable	Frenkel_acc equal 0      # total accumulated Frenkel pair  FRENKEL_ACCUMULATE
+
+pair_style      eam/fs
+pair_coeff      * *  Fe-P.eam.fs Fe
+
+neighbor	1.0 bin
+neigh_modify    every 1 delay 0 check yes
+
+thermo		100
+thermo_style    custom step time atoms pe ke etotal temp pxx pyy pzz pxy pxz pyz lx ly lz xy xz yz vol
+thermo_modify   flush yes format float %23.16e
+
+run 		0
+variable pe0 equal pe/${natoms}
+variable vol0 equal vol/${natoms}
+variable lx0 equal lx 
+variable ly0 equal ly 
+variable lz0 equal lz
+variable pxx0 equal pxx
+variable pyy0 equal pyy
+variable pzz0 equal pzz
+print "0 0 0 ${pe0} ${vol0} ${lx0} ${ly0} ${lz0} ${pxx0} ${pyy0} ${pzz0}" append ${filename}_pe_vol_box.dat # INITIAL_PE_VOL and box dimensions
+
+variable        total_relax_step equal round(${DPA_final}/${DPA_per_step})
+
+variable        picked_atom_func equal round(random(1,${natoms},543))
+variable        r_limit        equal 1.3
+variable        displace_max_x equal lx/4e0
+variable        displace_max_y equal ly/4e0
+variable        displace_max_z equal lz/4e0
+
+variable        delta_xlo equal xhi_bound-xhi
+variable        delta_xhi equal xlo_bound-xlo
+variable        delta_ylo equal yhi_bound-yhi
+variable        delta_yhi equal ylo_bound-ylo
+
+compute st all stress/atom NULL
+compute pe all pe/atom
+compute voro all voronoi/atom
+
+variable st11 atom c_st[1]/(vol/atoms)/1e6
+variable st22 atom c_st[2]/(vol/atoms)/1e6
+variable st33 atom c_st[3]/(vol/atoms)/1e6
+variable st12 atom c_st[4]/(vol/atoms)/1e6
+variable st31 atom c_st[5]/(vol/atoms)/1e6
+variable st23 atom c_st[6]/(vol/atoms)/1e6
+
+variable I1 atom v_st11+v_st22+v_st33
+variable I2 atom v_st11*v_st22+v_st22*v_st33+v_st11*v_st33-v_st12*v_st12-v_st23*v_st23-v_st31*v_st31
+variable vms atom sqrt(abs(3.0*(1.0/3.0*v_I1*v_I1-v_I2)))
+
+compute ave_pe all reduce ave c_pe
+compute ave_voro all reduce ave c_voro[1]
+compute ave_vms all reduce ave v_vms
+
+variable pe2 atom c_pe*c_pe
+variable voro2 atom c_voro[1]*c_voro[1]
+variable vms2 atom v_vms*v_vms
+
+compute ave_pe2 all reduce ave v_pe2
+compute ave_voro2 all reduce ave v_voro2
+compute ave_vms2 all reduce ave v_vms2
+
+variable vave_pe equal c_ave_pe
+variable vave_voro equal c_ave_voro
+variable vave_vms equal c_ave_vms
+
+variable sd_pe equal sqrt(abs(c_ave_pe2-c_ave_pe*c_ave_pe))
+variable sd_voro equal sqrt(abs(c_ave_voro2-c_ave_voro*c_ave_voro))
+variable sd_vms equal sqrt(abs(c_ave_vms2-c_ave_vms*c_ave_vms))
+
+thermo_style    custom step time atoms pe ke etotal temp pxx pyy pzz pxy pxz pyz lx ly lz xy xz yz vol v_vave_pe v_sd_pe v_vave_voro v_sd_voro v_vave_vms v_sd_vms
+
+label           loop_relax
+  variable        relax_step loop ${total_relax_step}  # RELAXATION_STEPS
+
+  #CRA;
+  group 	  atom_selected empty
+  label           loop_CRA
+    variable        NFrenkel loop ${Frenkel_per_step}
+    variable        picked_atom equal ${picked_atom_func}
+
+    label           redo_displacement
+    group           atom_selected id ${picked_atom}
+    displace_atoms  atom_selected random ${displace_max_x} ${displace_max_y} ${displace_max_z} 134 units box
+    group           atom_selected clear
+
+    variable        x_picked equal x[${picked_atom}]
+    variable        y_picked equal y[${picked_atom}]
+    variable        z_picked equal z[${picked_atom}]
+
+    variable        boundary_x_L   equal xlo+${y_picked}*xy+${z_picked}*xz+${r_limit}
+    variable        boundary_x_R   equal xhi+${y_picked}*xy+${z_picked}*xz-${r_limit}
+    variable        boundary_y_L   equal ylo+${z_picked}*yz+${r_limit}
+    variable        boundary_y_R   equal yhi+${z_picked}*yz-${r_limit}
+    variable        boundary_z_L   equal zlo+${r_limit}
+    variable        boundary_z_R   equal zhi-${r_limit}
+
+    group           check_sphere empty
+    if "${x_picked} > ${boundary_x_L} && ${x_picked} < ${boundary_x_R} && ${y_picked} > ${boundary_y_L} && ${y_picked} < ${boundary_y_R} && ${z_picked} > ${boundary_z_L} && ${z_picked} < ${boundary_z_R}" then &
+      "region         picked_atom_sphere sphere ${x_picked} ${y_picked} ${z_picked} ${r_limit}" &
+      "group          check_sphere region picked_atom_sphere" &
+      "region         picked_atom_sphere delete" &
+    else &
+      "include run_images.in" 
+
+    variable        atoms_in_sphere equal count(check_sphere)
+    variable        atoms_in_sphere0 equal ${atoms_in_sphere}
+    group           check_sphere delete
+    if "${atoms_in_sphere0} > 1" then "jump run_CRA.in redo_displacement"
+    
+    variable        Frenkel_acc equal ${Frenkel_acc}+1
+    next            NFrenkel
+  jump            run_CRA.in loop_CRA
+  group           atom_selected delete  
+
+  run 0
+
+  #minimizing
+  min_style cg
+  minimize 0.0 1e+1 100 100000000
+  minimize 0.0 9e-0 100 100000000
+  minimize 0.0 8e-0 100 100000000
+  minimize 0.0 7e-0 100 100000000
+  minimize 0.0 6e-0 100 100000000
+  minimize 0.0 5e-0 100 100000000
+  minimize 0.0 4e-0 100 100000000
+  minimize 0.0 3e-0 100 100000000
+  minimize 0.0 2e-0 100 100000000
+  minimize 0.0 1e-0 100 100000000
+  minimize 0.0 9e-1 100 100000000
+  minimize 0.0 8e-1 100 100000000
+  minimize 0.0 7e-1 100 100000000
+  minimize 0.0 6e-1 100 100000000
+  minimize 0.0 5e-1 100 100000000
+  minimize 0.0 4e-1 100 100000000
+  minimize 0.0 3e-1 100 100000000
+  minimize 0.0 2e-1 100 100000000
+  minimize 0.0 1e-1 100 100000000
+  minimize 0.0 9e-2 100 100000000
+  minimize 0.0 8e-2 100 100000000
+  minimize 0.0 7e-2 100 100000000
+  minimize 0.0 6e-2 100 100000000
+  minimize 0.0 5e-2 100 100000000
+  minimize 0.0 4e-2 100 100000000
+  minimize 0.0 3e-2 100 100000000
+  minimize 0.0 2e-2 100 100000000
+  minimize 0.0 1e-2 100 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 10000 100000000
+
+  fix        5 all box/relax x 0.0 y 0.0 z 0.0
+  min_style cg
+  minimize 0.0 1e+1 100 100000000
+  minimize 0.0 9e-0 100 100000000
+  minimize 0.0 8e-0 100 100000000
+  minimize 0.0 7e-0 100 100000000
+  minimize 0.0 6e-0 100 100000000
+  minimize 0.0 5e-0 100 100000000
+  minimize 0.0 4e-0 100 100000000
+  minimize 0.0 3e-0 100 100000000
+  minimize 0.0 2e-0 100 100000000
+  minimize 0.0 1e-0 100 100000000
+  minimize 0.0 9e-1 100 100000000
+  minimize 0.0 8e-1 100 100000000
+  minimize 0.0 7e-1 100 100000000
+  minimize 0.0 6e-1 100 100000000
+  minimize 0.0 5e-1 100 100000000
+  minimize 0.0 4e-1 100 100000000
+  minimize 0.0 3e-1 100 100000000
+  minimize 0.0 2e-1 100 100000000
+  minimize 0.0 1e-1 100 100000000
+  minimize 0.0 9e-2 100 100000000
+  minimize 0.0 8e-2 100 100000000
+  minimize 0.0 7e-2 100 100000000
+  minimize 0.0 6e-2 100 100000000
+  minimize 0.0 5e-2 100 100000000
+  minimize 0.0 4e-2 100 100000000
+  minimize 0.0 3e-2 100 100000000
+  minimize 0.0 2e-2 100 100000000
+  minimize 0.0 1e-2 100 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 1000 100000000
+  minimize 0.0 1e-3 10000 100000000
+  unfix 5
+    
+  variable DPA_acc equal ${Frenkel_acc}/${natoms}
+
+  if "${relax_step} <= 10" then "variable bool_write equal ${relax_step}%1" &
+  elif "${DPA_acc} <= 1" "variable bool_write equal ${relax_step}%10" &
+  else "variable bool_write equal ${relax_step}%50"
+
+  if "${bool_write} == 0" then "write_data ${filename}_relax_${relax_step}steps.lmp"
+
+  run 0
+  variable step0 equal step
+  variable pe0 equal pe/${natoms}
+  variable vol0 equal vol/${natoms}
+  variable lz0 equal lz
+  variable lx0 equal lx 
+  variable ly0 equal ly 
+  variable pxx0 equal pxx
+  variable pyy0 equal pyy
+  variable pzz0 equal pzz
+  print "${relax_step} ${step0} ${DPA_acc} ${pe0} ${vol0} ${lx0} ${ly0} ${lz0} ${pxx0} ${pyy0} ${pzz0}" append ${filename}_pe_vol_box.dat
+  
+  print  "${DPA_acc} ${vave_pe} ${sd_pe} ${vave_voro} ${sd_voro} ${vave_vms} ${sd_vms}" append ${filename}_pe_voro_vms.dat
+
+  next           relax_step
+  
+jump           run_CRA.in loop_relax
+variable       relax_step delete
+
+variable DPA_acc equal ${Frenkel_acc}/${natoms}
+
+print "Total Frenkel pair = ${Frenkel_acc}"
+print "Total cDPA         = ${DPA_acc}"
+
+write_data     ${filename}_relax_final.lmp
